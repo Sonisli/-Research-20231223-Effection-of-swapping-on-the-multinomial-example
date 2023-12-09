@@ -1,0 +1,2033 @@
+---
+title: "Effection of swapping on the multinomial example"
+author: "Qiru Pan"
+date: "2023-12-11"
+output: 
+  prettydoc::html_pretty
+---
+
+```{r setup,include=FALSE, warning = FALSE}
+library(prettydoc)
+library(formatR)
+library(MASS)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(MCMCpack)
+library(tibble)
+library(knitr)
+library(RColorBrewer)
+library(combinat)
+library(grid)
+library(gridExtra)
+library(kableExtra)
+set.seed(2023)
+
+```
+# Generating Model
+
+In the basic setup, we employ a multinomial distribution to simulate the
+generation of values for y1, y2, y3, and y4. These data are then
+presented in a 2x2 marginal table, where cells, from the top-left to the
+bottom-right, store the values of y1 through y4, respectively. We
+further stipulate that the rows of this 2x2 marginal table represent the
+answers to two questions (Question 1 and Question 2), both of which are
+binary variables. This gives us a nx2 data table representing
+combinations of answers.
+
+#### Our primary concern is: by applying a swap algorithm that satisfies Differential Privacy (DP) on the n x 2 data, without altering any marginal totals, would it impact the statistical measure φ, defined as: θ1θ4 / (θ2θ3)?
+
+**If the answer is affirmative, what factors influence this impact?**
+
+**As data analysts, if we assume that the privatized data we receive is trustworthy and proceed with a naive analysis, what would be the outcome?**
+
+**How can we quantify the "swap algorithm" to employ Bayesian analysis, allowing for meaningful statistical inference when only having the swapped privacy data?**
+
+Generating Model The following data generating model is used:
+
+$$\theta^* = (0.27, 0.23, 0.23, 0.27).$$
+
+The data likelihood is
+
+$$\vec y \mid \theta \sim Mult(n, \theta)$$
+
+And remember our \(φ\) is
+
+$$\phi = \frac{θ_1θ_4}{θ_2θ_3}$$
+
+```{r, tidy = TRUE, cache=TRUE}
+# Data Generation
+n <- 100000
+theta <- c(0.27, 0.23, 0.23, 0.27) 
+data <- rmultinom(n, size=1, prob=theta)
+data <- t(data)
+
+# Constructing the 2x2 Marginal Table
+marginal_table <- matrix(NA, nrow=2, ncol=2)
+marginal_table[1,1] <- sum(data[,1])
+marginal_table[1,2] <- sum(data[,2])
+marginal_table[2,1] <- sum(data[,3])
+marginal_table[2,2] <- sum(data[,4])
+
+# Calculating ϕ∗
+phi_star <- theta[1]*theta[4] / (theta[2]*theta[3])
+
+# Estimating θ values
+theta_hat <- c(marginal_table[1,1], marginal_table[1,2], marginal_table[2,1], marginal_table[2,2]) / n
+
+
+# Calculating ϕactual then Comparing ϕ∗ and ϕactual
+phi_actual <- theta_hat[1]*theta_hat[4] / (theta_hat[2]*theta_hat[3])
+difference <- phi_actual - phi_star
+
+print(paste("phi_star:", phi_star))
+print(paste("phi_actual:", phi_actual))
+print(paste("Difference:", difference))
+
+```
+
+# Dirichlet posterior model with confidence data
+
+We choose Dirichlet(1,1,1,1) as prior distribution, Compute the
+posterior distribution based on the prior distribution and the observed
+data. 
+$$ \pi (\theta) \sim Dir(1,1,1,1) $$
+
+Then, samples are drawn from the posterior distribution and the \(φ\) value
+is calculated for each sample.
+
+$$ p (\theta\mid \vec y) \sim Dir(1+y_1,1+y_2,1+y_3,1+y_4) $$ 
+
+Finally, these \(φ\) values are used to plot histograms and density plots of their
+distribution.
+
+```{r, tidy = TRUE}
+alpha_prior <- c(1,1,1,1)
+data_counts <- data_counts <- as.vector(t(marginal_table))
+alpha_posterior <- alpha_prior + data_counts
+
+num_samples <- 100000
+
+# Drawing samples from the posterior Dirichlet distribution
+theta_samples <- matrix(NA, nrow=num_samples, ncol=4)
+for (i in 1:num_samples) {
+  theta_samples[i,] <- rdirichlet(1, alpha_posterior)
+}
+
+# Calculating Phi for each sample
+phi_values <- theta_samples[, 1] * theta_samples[, 4] / (theta_samples[, 2] * theta_samples[, 3])
+difference <- mean(phi_values) - phi_star
+print(paste("phi from actual posterior:", mean(phi_values)))
+print(paste("Difference:", difference))
+
+# Plotting the distribution of Phi
+ggplot(data.frame(phi_values), aes(x=phi_values)) + 
+  geom_histogram(aes(y=..density..), bins=50, fill="blue", alpha=0.7) + 
+  labs(title="Distribution of Phi", x="Phi Value", y="Density") + 
+  theme_minimal()
+
+ggplot(data.frame(phi_values), aes(x=phi_values)) + 
+  geom_density(fill="gray", alpha=0.7) + 
+  labs(title="Density Distribution of Phi", x="Phi Value", y="Density") + 
+  theme_minimal()
+
+```
+
+# Performing swapping algorithm
+
+Convert the multinomial distribution data into a 2 x n tabular format,
+then select a subset of the data and perform a swapping algorithm on it where the swapping rate is 0.5 which means 50% of the data will be swapped (But not 50% of the data will be Perturbed).
+
+**It is worth noting that since we only have 2 columns of data here, we make the match variable empty, use the first column as the hold variable, the second column as the swap variable and use the derangement function to perform swapping. Such a setting satisfies differential privacy when certain assumptions are met.**
+
+```{r, tidy = TRUE}
+# Convert the multinomial data to N*2 table format: data_margin
+n <- nrow(data)
+data_margin <- matrix(NA, nrow=n, ncol=2)
+
+for(i in 1:n) {
+  if(data[i,1] == 1) {
+    data_margin[i,] <- c(1, 1)
+  } else if(data[i,2] == 1) {
+    data_margin[i,] <- c(1, 0)
+  } else if(data[i,3] == 1) {
+    data_margin[i,] <- c(0, 1)
+  } else if(data[i,4] == 1) {
+    data_margin[i,] <- c(0, 0)
+  }
+}
+
+colnames(data_margin) <- c("Q1", "Q2")
+
+
+derangr <- function(x) {
+  v = 1:length(x)
+  while(TRUE) {
+    xp <- sample(v)
+    if(sum(xp == v) == 0) break
+  }
+  return(x[xp])
+}
+
+
+
+# Determine which rows to swap based on probability p
+p <- 0.5
+swap_indicator <- rbinom(nrow(data_margin), 1, p)
+selected <- which(swap_indicator == 1)
+
+swapped_values <- derangr(data_margin[selected, 2])
+data_swapped <- data_margin
+data_swapped[selected, 2] <- swapped_values
+
+
+
+
+# recalculate marginal table
+marginal_table_swapped <- matrix(NA, nrow=2, ncol=2)
+marginal_table_swapped[1,1] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 1)
+marginal_table_swapped[1,2] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 0)
+marginal_table_swapped[2,1] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 1)
+marginal_table_swapped[2,2] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 0)
+
+print(marginal_table_swapped)
+
+# Estimating θ values
+theta_hat_swapped <- c(marginal_table_swapped[1,1], marginal_table_swapped[1,2], marginal_table_swapped[2,1], marginal_table_swapped[2,2]) / n
+
+# Calculating ϕ
+phi_swapped <- theta_hat_swapped[1]*theta_hat_swapped[4] / (theta_hat_swapped[2]*theta_hat_swapped[3])
+print(paste("phi_swapped:", phi_swapped))
+
+```
+
+# Dirichlet posterior model with swapped data
+
+Here we have the same setting before: Calculate the posterior parameters for Dirichlet distribution and Plot the distribution of swapped \(φ\).
+
+$$ \pi (\theta) \sim Dir(1,1,1,1) $$ 
+As before but with swapped setting:
+$$ p (\theta\mid \tilde y) \sim Dir(1+\tilde y_1,1+\tilde y_2,1+\tilde y_3,1+\tilde y_4) $$
+```{r, tidy = TRUE}
+# Calculate the posterior parameters for Dirichlet distribution
+alpha_prior <- c(1,1,1,1)
+data_counts_swapped <- as.vector(t(marginal_table_swapped))
+alpha_posterior_swapped <- alpha_prior + data_counts_swapped
+
+num_samples <- 100000
+
+# Drawing samples from the posterior Dirichlet distribution
+theta_samples_swapped <- matrix(NA, nrow=num_samples, ncol=4)
+for (i in 1:num_samples) {
+  theta_samples_swapped[i,] <- rdirichlet(1, alpha_posterior_swapped)
+}
+
+# Calculating Phi for each sample
+phi_values_swapped <- theta_samples_swapped[, 1] * theta_samples_swapped[, 4] / (theta_samples_swapped[, 2] * theta_samples_swapped[, 3])
+difference <- mean(phi_values_swapped) - phi_star
+print(paste("phi from swapped table:", mean(phi_values_swapped)))
+print(paste("Difference:", difference))
+
+# Plotting the distribution of Phi
+ggplot(data.frame(phi_values_swapped), aes(x=phi_values_swapped)) + 
+  geom_histogram(aes(y=..density..), bins=50, fill="blue", alpha=0.7) + 
+  labs(title="Distribution of Phi (Swapped)", x="Phi Value (Swapped)", y="Density") + 
+  theme_minimal()
+
+ggplot(data.frame(phi_values_swapped), aes(x=phi_values_swapped)) + 
+  geom_density(fill="gray", alpha=0.7) + 
+  labs(title="Density Distribution of Phi (Swapped)", x="Phi Value (Swapped)", y="Density") + 
+  theme_minimal()
+```
+
+# Plot the combined density plot
+```{r, tidy = TRUE}
+# Combine the data into a single data frame for plotting
+combined_data <- data.frame(
+  Value = c(phi_values, phi_values_swapped),
+  Source = factor(c(rep("Original", length(phi_values)), rep("Swapped", length(phi_values_swapped))))
+)
+
+# Plot the combined density plot
+ggplot(combined_data, aes(x=Value, fill=Source)) + 
+  geom_density(alpha=0.5) + 
+  labs(title="Density Distribution of Phi: Original vs Swapped", x="Phi Value", y="Density") + 
+  scale_fill_manual(values=c("blue", "red")) + 
+  theme_minimal()
+```
+
+# Empirical Observations
+
+#### First, intuitively, we observe a decrease in the value of phi, confirming our initial query: it's indeed feasible to alter the statistic's value while preserving the marginal sum.
+
+Then, With an initial θ distribution of (0.27, 0.23, 0.23, 0.27),the distribution of \(φ\) derived from the swapped data **always** exhibited values lower than the \(φ\) derived from the original data.
+This consistent overestimation is due to the initial distribution's predisposition of having a×d always larger than b×c, making the real \(φ\) greater than 1. Given this, the derangement function's swapping behavior, which has a higher likelihood of encountering a or d over b or c, causes the swapped data to lean towards a uniform distribution. 
+
+The same logic can may be applied in reverse, supported by
+numerical experiments, where an initial theta of (0.23, 0.27, 0.27,
+0.23) results in a swapped \(φ\) that's always greater than the actual
+value.
+
+
+**To prove our hypothesis, let's run a simulation using the "symmetric" setting:**
+
+$$\theta^* = (0.23, 0.27, 0.27, 0.23).$$
+Data likelihood function and the definition of \(φ\) are not changed. To simplify, we do not show the code and only show the comparison of density estimates obtained by sampling the posterior model using confidence data and swapped data (where the swapping rate is still 0.5).
+
+```{r, tidy = TRUE, echo=FALSE}
+theta <- c(0.23, 0.27, 0.27, 0.23) 
+n <- 100000
+data <- rmultinom(n, size=1, prob=theta)
+data <- t(data)
+
+# Constructing the 2x2 Marginal Table
+marginal_table <- matrix(NA, nrow=2, ncol=2)
+marginal_table[1,1] <- sum(data[,1])
+marginal_table[1,2] <- sum(data[,2])
+marginal_table[2,1] <- sum(data[,3])
+marginal_table[2,2] <- sum(data[,4])
+
+# Calculating ϕ∗
+phi_star <- theta[1]*theta[4] / (theta[2]*theta[3])
+
+# Posterior model using same setting:
+alpha_prior <- c(1,1,1,1)
+data_counts <- data_counts <- as.vector(t(marginal_table))
+alpha_posterior <- alpha_prior + data_counts
+
+num_samples <- 100000
+
+# Drawing samples from the posterior Dirichlet distribution
+theta_samples <- matrix(NA, nrow=num_samples, ncol=4)
+for (i in 1:num_samples) {
+  theta_samples[i,] <- rdirichlet(1, alpha_posterior)
+}
+
+# Calculating Phi for each sample
+phi_values <- theta_samples[, 1] * theta_samples[, 4] / (theta_samples[, 2] * theta_samples[, 3])
+
+
+
+# Using swapping ALG:
+# Convert the multinomial data to 2xN table format: data_margin
+n <- nrow(data)
+data_margin <- matrix(NA, nrow=n, ncol=2)
+
+for(i in 1:n) {
+  if(data[i,1] == 1) {
+    data_margin[i,] <- c(1, 1)
+  } else if(data[i,2] == 1) {
+    data_margin[i,] <- c(1, 0)
+  } else if(data[i,3] == 1) {
+    data_margin[i,] <- c(0, 1)
+  } else if(data[i,4] == 1) {
+    data_margin[i,] <- c(0, 0)
+  }
+}
+
+colnames(data_margin) <- c("Q1", "Q2")
+
+
+# Apply function to data
+p <- 0.5
+swap_indicator <- rbinom(nrow(data_margin), 1, p)
+selected <- which(swap_indicator == 1)
+
+swapped_values <- derangr(data_margin[selected, 2])
+data_swapped <- data_margin
+data_swapped[selected, 2] <- swapped_values
+
+
+
+
+# recalculate marginal table
+marginal_table_swapped <- matrix(NA, nrow=2, ncol=2)
+marginal_table_swapped[1,1] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 1)
+marginal_table_swapped[1,2] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 0)
+marginal_table_swapped[2,1] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 1)
+marginal_table_swapped[2,2] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 0)
+
+
+# Calculate the posterior parameters for Dirichlet distribution
+alpha_prior <- c(1,1,1,1)
+data_counts_swapped <- as.vector(t(marginal_table_swapped))
+alpha_posterior_swapped <- alpha_prior + data_counts_swapped
+
+num_samples <- 100000
+
+# Drawing samples from the posterior Dirichlet distribution
+theta_samples_swapped <- matrix(NA, nrow=num_samples, ncol=4)
+for (i in 1:num_samples) {
+  theta_samples_swapped[i,] <- rdirichlet(1, alpha_posterior_swapped)
+}
+
+# Calculating Phi for each sample
+phi_values_swapped <- theta_samples_swapped[, 1] * theta_samples_swapped[, 4] / (theta_samples_swapped[, 2] * theta_samples_swapped[, 3])
+
+# Combine the data into a single data frame for plotting
+combined_data <- data.frame(
+  Value = c(phi_values, phi_values_swapped),
+  Source = factor(c(rep("Original", length(phi_values)), rep("Swapped", length(phi_values_swapped))))
+)
+
+# Plot the combined density plot
+ggplot(combined_data, aes(x=Value, fill=Source)) + 
+  geom_density(alpha=0.5) + 
+  labs(title="Density Distribution of Phi: Original vs Swapped", x="Phi Value", y="Density") + 
+  scale_fill_manual(values=c("blue", "red")) + 
+  theme_minimal()
+
+
+```
+
+We have conducted many experiments, and we can confirm our hypothesis: the exchange algorithm will make \(φ\), which is not 1, "drag" toward 1.
+
+#### The swapping algorithm does change the value of the statistic and if we use private data to perform statistical inference directly, we will get a wrong conclusion - in our model, we will get a φ that is closer to 1 than the true value. And this also answers our second and third questions.
+
+**In addition, we also discovered an interesting phenomenon:**
+
+**When $$\theta^* = (0.23, 0.27, 0.27, 0.23).$$ The peak of the distribution of ϕ before swapping is higher than after swapping ϕ_tilde.**
+
+**When $$\theta^* = (0.27, 0.23, 0.23, 0.27).$$ The peak of the distribution of ϕ_tilde after swapping is higher than ϕ before swapping .**
+
+
+#### The swapping algorithm may affect the patterns and structures of the data in different ways under different settings. In some cases, swapping might increase the variability of certain statistics, while in others, it might reduce the variability of these statistics.
+
+
+To confirm our idea, we conducted the following experiments:
+
+**Apply swapping rate from 0.1,0.2,...,1 to the data with:** 
+$$\theta^* = (0.27, 0.23, 0.23, 0.27).$$
+
+```{r, echo=FALSE}
+theta <- c(0.27, 0.23, 0.23, 0.27) 
+n <- 100000
+data <- rmultinom(n, size=1, prob=theta)
+data <- t(data)
+
+# Constructing the 2x2 Marginal Table
+marginal_table <- matrix(NA, nrow=2, ncol=2)
+marginal_table[1,1] <- sum(data[,1])
+marginal_table[1,2] <- sum(data[,2])
+marginal_table[2,1] <- sum(data[,3])
+marginal_table[2,2] <- sum(data[,4])
+
+# Calculating ϕ∗
+phi_star <- theta[1]*theta[4] / (theta[2]*theta[3])
+
+# Posterior model using same setting:
+alpha_prior <- c(1,1,1,1)
+data_counts <- data_counts <- as.vector(t(marginal_table))
+alpha_posterior <- alpha_prior + data_counts
+
+num_samples <- 100000
+
+# Drawing samples from the posterior Dirichlet distribution
+theta_samples <- matrix(NA, nrow=num_samples, ncol=4)
+for (i in 1:num_samples) {
+  theta_samples[i,] <- rdirichlet(1, alpha_posterior)
+}
+
+# Calculating Phi for each sample
+phi_values <- theta_samples[, 1] * theta_samples[, 4] / (theta_samples[, 2] * theta_samples[, 3])
+
+combined_data <- data.frame(Value = phi_values, Source = "Original")
+
+# p from 0.1 - 1
+p_values <- seq(0.1, 1, by=0.1)
+for(p in p_values) {
+    
+    # Using swapping ALG:
+  # Convert the multinomial data to 2xN table format: data_margin
+  n <- nrow(data)
+  data_margin <- matrix(NA, nrow=n, ncol=2)
+  
+  for(i in 1:n) {
+    if(data[i,1] == 1) {
+      data_margin[i,] <- c(1, 1)
+    } else if(data[i,2] == 1) {
+      data_margin[i,] <- c(1, 0)
+    } else if(data[i,3] == 1) {
+      data_margin[i,] <- c(0, 1)
+    } else if(data[i,4] == 1) {
+      data_margin[i,] <- c(0, 0)
+    }
+  }
+  
+  colnames(data_margin) <- c("Q1", "Q2")
+  
+  
+  derangr <- function(x) {
+    v = 1:length(x)
+    while(TRUE) {
+      xp <- sample(v)
+      if(sum(xp == v) == 0) break
+    }
+    return(x[xp])
+  }
+  
+  
+  # Apply function to data
+  swap_indicator <- rbinom(nrow(data_margin), 1, p)
+  selected <- which(swap_indicator == 1)
+  
+  swapped_values <- derangr(data_margin[selected, 2])
+  data_swapped <- data_margin
+  data_swapped[selected, 2] <- swapped_values
+  
+  # recalculate marginal table
+  marginal_table_swapped <- matrix(NA, nrow=2, ncol=2)
+  marginal_table_swapped[1,1] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 1)
+  marginal_table_swapped[1,2] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 0)
+  marginal_table_swapped[2,1] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 1)
+  marginal_table_swapped[2,2] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 0)
+  
+  
+  # Calculate the posterior parameters for Dirichlet distribution
+  alpha_prior <- c(1,1,1,1)
+  data_counts_swapped <- as.vector(t(marginal_table_swapped))
+  alpha_posterior_swapped <- alpha_prior + data_counts_swapped
+  
+  num_samples <- 100000
+  
+  # Drawing samples from the posterior Dirichlet distribution
+  theta_samples_swapped <- matrix(NA, nrow=num_samples, ncol=4)
+  for (i in 1:num_samples) {
+    theta_samples_swapped[i,] <- rdirichlet(1, alpha_posterior_swapped)
+  }
+  
+  # Calculating Phi for each sample
+  phi_values_swapped <- theta_samples_swapped[, 1] * theta_samples_swapped[, 4] / (theta_samples_swapped[, 2] * theta_samples_swapped[, 3])
+  
+  # Add phi_values_swapped into combined_data
+  temp_data <- data.frame(Value = phi_values_swapped, Source = paste0("Swapped_p=", p))
+  combined_data <- rbind(combined_data, temp_data)
+}
+
+# Get enough color for plotting
+color_palette <- brewer.pal(n=length(unique(combined_data$Source)), name="Set3")
+
+# Plot the combined density plot
+ggplot(combined_data, aes(x=Value, fill=Source)) + 
+  geom_density(alpha=0.5) + 
+  labs(title="Density Distribution of Phi: Original vs Swapped", x="Phi Value", y="Density") + 
+  scale_fill_manual(values=color_palette) + 
+  theme_minimal()
+```
+
+**Apply swapping rate from 0.1,0.2,...,1 to the data with:** 
+$$\theta^* = (0.23, 0.27, 0.27, 0.23).$$
+```{r, echo=FALSE}
+theta <- c(0.23, 0.27, 0.27, 0.23) 
+n <- 100000
+data <- rmultinom(n, size=1, prob=theta)
+data <- t(data)
+
+# Constructing the 2x2 Marginal Table
+marginal_table <- matrix(NA, nrow=2, ncol=2)
+marginal_table[1,1] <- sum(data[,1])
+marginal_table[1,2] <- sum(data[,2])
+marginal_table[2,1] <- sum(data[,3])
+marginal_table[2,2] <- sum(data[,4])
+
+# Calculating ϕ∗
+phi_star <- theta[1]*theta[4] / (theta[2]*theta[3])
+
+# Posterior model using same setting:
+alpha_prior <- c(1,1,1,1)
+data_counts <- data_counts <- as.vector(t(marginal_table))
+alpha_posterior <- alpha_prior + data_counts
+
+num_samples <- 100000
+
+# Drawing samples from the posterior Dirichlet distribution
+theta_samples <- matrix(NA, nrow=num_samples, ncol=4)
+for (i in 1:num_samples) {
+  theta_samples[i,] <- rdirichlet(1, alpha_posterior)
+}
+
+# Calculating Phi for each sample
+phi_values <- theta_samples[, 1] * theta_samples[, 4] / (theta_samples[, 2] * theta_samples[, 3])
+
+combined_data <- data.frame(Value = phi_values, Source = "Original")
+
+# p from 0.1 - 1
+p_values <- seq(0.1, 1, by=0.1)
+for(p in p_values) {
+    
+    # Using swapping ALG:
+  # Convert the multinomial data to 2xN table format: data_margin
+  n <- nrow(data)
+  data_margin <- matrix(NA, nrow=n, ncol=2)
+  
+  for(i in 1:n) {
+    if(data[i,1] == 1) {
+      data_margin[i,] <- c(1, 1)
+    } else if(data[i,2] == 1) {
+      data_margin[i,] <- c(1, 0)
+    } else if(data[i,3] == 1) {
+      data_margin[i,] <- c(0, 1)
+    } else if(data[i,4] == 1) {
+      data_margin[i,] <- c(0, 0)
+    }
+  }
+  
+  colnames(data_margin) <- c("Q1", "Q2")
+  
+  
+  derangr <- function(x) {
+    v = 1:length(x)
+    while(TRUE) {
+      xp <- sample(v)
+      if(sum(xp == v) == 0) break
+    }
+    return(x[xp])
+  }
+  
+  
+  # Apply function to data
+  swap_indicator <- rbinom(nrow(data_margin), 1, p)
+  selected <- which(swap_indicator == 1)
+  
+  swapped_values <- derangr(data_margin[selected, 2])
+  data_swapped <- data_margin
+  data_swapped[selected, 2] <- swapped_values
+  
+  
+  # recalculate marginal table
+  marginal_table_swapped <- matrix(NA, nrow=2, ncol=2)
+  marginal_table_swapped[1,1] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 1)
+  marginal_table_swapped[1,2] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 0)
+  marginal_table_swapped[2,1] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 1)
+  marginal_table_swapped[2,2] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 0)
+  
+  
+  # Calculate the posterior parameters for Dirichlet distribution
+  alpha_prior <- c(1,1,1,1)
+  data_counts_swapped <- as.vector(t(marginal_table_swapped))
+  alpha_posterior_swapped <- alpha_prior + data_counts_swapped
+  
+  num_samples <- 100000
+  
+  # Drawing samples from the posterior Dirichlet distribution
+  theta_samples_swapped <- matrix(NA, nrow=num_samples, ncol=4)
+  for (i in 1:num_samples) {
+    theta_samples_swapped[i,] <- rdirichlet(1, alpha_posterior_swapped)
+  }
+  
+  # Calculating Phi for each sample
+  phi_values_swapped <- theta_samples_swapped[, 1] * theta_samples_swapped[, 4] / (theta_samples_swapped[, 2] * theta_samples_swapped[, 3])
+  
+  # Add phi_values_swapped into combined_data
+  temp_data <- data.frame(Value = phi_values_swapped, Source = paste0("Swapped_p=", p))
+  combined_data <- rbind(combined_data, temp_data)
+}
+
+# Get enough color for plotting
+color_palette <- brewer.pal(n=length(unique(combined_data$Source)), name="Set3")
+
+# Plot the combined density plot
+ggplot(combined_data, aes(x=Value, fill=Source)) + 
+  geom_density(alpha=0.5) + 
+  labs(title="Density Distribution of Phi: Original vs Swapped", x="Phi Value", y="Density") + 
+  scale_fill_manual(values=color_palette) + 
+  theme_minimal()
+```
+
+# Summary:
+For $$\theta^* = (0.23, 0.27, 0.27, 0.23).$$ The peak of the \(φ\) distribution in the original data is around 0.7, indicating a relatively concentrated distribution.
+
+#### As the swapping proportion p increases, the peak of the ϕ distribution gradually decreases, suggesting a decrease in data concentration. Concurrently, the value of ϕ is progressively pulled towards 1, indicating an increase in data uniformity, suggesting an increase in data uncertainty.
+
+For $$\theta^* = (0.27, 0.23, 0.23, 0.27).$$ The peak of the \(φ\) distribution in the original data is around 1.4, indicating a relatively dispersed distribution.
+
+#### As the swapping proportion p increases, the peak of the ϕ distribution gradually rises, suggesting an increase in data concentration. Concurrently, the value of ϕ is also progressively pulled towards 1, indicating an increase in data uniformity, *possibly* suggesting a decrease in data uncertainty, though this would require further statistical verification.
+
+
+### Finally, let’s try a more extreme example
+$$\theta^* = (0.7, 0.1, 0.1, 0.1)$$
+
+### with different swapping rate.
+
+
+```{r, echo=FALSE}
+theta <- c(0.7, 0.1, 0.1, 0.1) 
+n <- 100000
+data <- rmultinom(n, size=1, prob=theta)
+data <- t(data)
+
+# Constructing the 2x2 Marginal Table
+marginal_table <- matrix(NA, nrow=2, ncol=2)
+marginal_table[1,1] <- sum(data[,1])
+marginal_table[1,2] <- sum(data[,2])
+marginal_table[2,1] <- sum(data[,3])
+marginal_table[2,2] <- sum(data[,4])
+
+# Calculating ϕ∗
+phi_star <- theta[1]*theta[4] / (theta[2]*theta[3])
+
+# Posterior model using same setting:
+alpha_prior <- c(1,1,1,1)
+data_counts <- data_counts <- as.vector(t(marginal_table))
+alpha_posterior <- alpha_prior + data_counts
+
+num_samples <- 100000
+
+# Drawing samples from the posterior Dirichlet distribution
+theta_samples <- matrix(NA, nrow=num_samples, ncol=4)
+for (i in 1:num_samples) {
+  theta_samples[i,] <- rdirichlet(1, alpha_posterior)
+}
+
+# Calculating Phi for each sample
+phi_values <- theta_samples[, 1] * theta_samples[, 4] / (theta_samples[, 2] * theta_samples[, 3])
+
+combined_data <- data.frame(Value = phi_values, Source = "Original")
+
+# p from 0.1 - 1
+p_values <- seq(0.1, 1, by=0.1)
+for(p in p_values) {
+    
+    # Using swapping ALG:
+  # Convert the multinomial data to 2xN table format: data_margin
+  n <- nrow(data)
+  data_margin <- matrix(NA, nrow=n, ncol=2)
+  
+  for(i in 1:n) {
+    if(data[i,1] == 1) {
+      data_margin[i,] <- c(1, 1)
+    } else if(data[i,2] == 1) {
+      data_margin[i,] <- c(1, 0)
+    } else if(data[i,3] == 1) {
+      data_margin[i,] <- c(0, 1)
+    } else if(data[i,4] == 1) {
+      data_margin[i,] <- c(0, 0)
+    }
+  }
+  
+  colnames(data_margin) <- c("Q1", "Q2")
+  
+  
+  derangr <- function(x) {
+    v = 1:length(x)
+    while(TRUE) {
+      xp <- sample(v)
+      if(sum(xp == v) == 0) break
+    }
+    return(x[xp])
+  }
+  
+  
+  # Apply function to data
+  swap_indicator <- rbinom(nrow(data_margin), 1, p)
+  selected <- which(swap_indicator == 1)
+  
+  swapped_values <- derangr(data_margin[selected, 2])
+  data_swapped <- data_margin
+  data_swapped[selected, 2] <- swapped_values
+  
+  
+  # recalculate marginal table
+  marginal_table_swapped <- matrix(NA, nrow=2, ncol=2)
+  marginal_table_swapped[1,1] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 1)
+  marginal_table_swapped[1,2] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 0)
+  marginal_table_swapped[2,1] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 1)
+  marginal_table_swapped[2,2] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 0)
+  
+  
+  # Calculate the posterior parameters for Dirichlet distribution
+  alpha_prior <- c(1,1,1,1)
+  data_counts_swapped <- as.vector(t(marginal_table_swapped))
+  alpha_posterior_swapped <- alpha_prior + data_counts_swapped
+  
+  num_samples <- 100000
+  
+  # Drawing samples from the posterior Dirichlet distribution
+  theta_samples_swapped <- matrix(NA, nrow=num_samples, ncol=4)
+  for (i in 1:num_samples) {
+    theta_samples_swapped[i,] <- rdirichlet(1, alpha_posterior_swapped)
+  }
+  
+  # Calculating Phi for each sample
+  phi_values_swapped <- theta_samples_swapped[, 1] * theta_samples_swapped[, 4] / (theta_samples_swapped[, 2] * theta_samples_swapped[, 3])
+  
+  # Add phi_values_swapped into combined_data
+  temp_data <- data.frame(Value = phi_values_swapped, Source = paste0("Swapped_p=", p))
+  combined_data <- rbind(combined_data, temp_data)
+}
+
+# Get enough color for plotting
+color_palette <- brewer.pal(n=length(unique(combined_data$Source)), name="Set3")
+
+# Plot the combined density plot
+ggplot(combined_data, aes(x=Value, fill=Source)) + 
+  geom_density(alpha=0.5) + 
+  labs(title="Density Distribution of Phi: Original vs Swapped", x="Phi Value", y="Density") + 
+  scale_fill_manual(values=color_palette) + 
+  theme_minimal()
+```
+
+As expected, the exchange algorithm makes extreme \(φ\) changes more elusive, and as described above, a phi far away from 1 will obtain a more dispersed distribution by sampling from the posterior distribution model. As the exchange rate increases, the peak of the \(φ\) distribution gradually rises, and the shape of the probability density estimate becomes more concentrated and sharp.
+
+### Therefore, we can draw the following conclusion from the above figures: As p increases, the number of rows selected for swapping also increases, so the internal structure (information) of the data itself is destroyed more. When p=1, the structure is completely destroyed. At this time, regardless of the initial setting of θ, the mean value of φ is near 1.
+
+In order to ensure that when p = 1 we get \(φ\) that deviates slightly from 1 because of Monte Carlo error rather than some structural information that is not destroyed by the swapping algorithm. We no longer set the seed and run the algorithm with an swapping rate of 1 multiple times, and finally plot the multiple exchanged data into a graph.
+
+```{r, echo=FALSE}
+theta <- c(0.23, 0.27, 0.27, 0.23) 
+n <- 100000
+data <- rmultinom(n, size=1, prob=theta)
+data <- t(data)
+
+# Constructing the 2x2 Marginal Table
+marginal_table <- matrix(NA, nrow=2, ncol=2)
+marginal_table[1,1] <- sum(data[,1])
+marginal_table[1,2] <- sum(data[,2])
+marginal_table[2,1] <- sum(data[,3])
+marginal_table[2,2] <- sum(data[,4])
+
+# Calculating ϕ∗
+phi_star <- theta[1]*theta[4] / (theta[2]*theta[3])
+
+combined_data <- data.frame(Value = numeric(), Source = character())
+
+# Set p to 1
+p <- 1
+
+# Repeat the process 10 times
+for (iteration in 1:10) {
+  
+  # Convert the multinomial data to 2xN table format: data_margin
+  n <- nrow(data)
+  data_margin <- matrix(NA, nrow=n, ncol=2)
+  
+  for(i in 1:n) {
+    if(data[i,1] == 1) {
+      data_margin[i,] <- c(1, 1)
+    } else if(data[i,2] == 1) {
+      data_margin[i,] <- c(1, 0)
+    } else if(data[i,3] == 1) {
+      data_margin[i,] <- c(0, 1)
+    } else if(data[i,4] == 1) {
+      data_margin[i,] <- c(0, 0)
+    }
+  }
+  
+  colnames(data_margin) <- c("Q1", "Q2")
+  
+  derangr <- function(x) {
+    v = 1:length(x)
+    while(TRUE) {
+      xp <- sample(v)
+      if(sum(xp == v) == 0) break
+    }
+    return(x[xp])
+  }
+  
+  # Apply function to data
+  swap_indicator <- rbinom(nrow(data_margin), 1, p)
+  selected <- which(swap_indicator == 1)
+  
+  swapped_values <- derangr(data_margin[selected, 2])
+  data_swapped <- data_margin
+  data_swapped[selected, 2] <- swapped_values
+  
+  # recalculate marginal table
+  marginal_table_swapped <- matrix(NA, nrow=2, ncol=2)
+  marginal_table_swapped[1,1] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 1)
+  marginal_table_swapped[1,2] <- sum(data_swapped[,1] == 1 & data_swapped[,2] == 0)
+  marginal_table_swapped[2,1] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 1)
+  marginal_table_swapped[2,2] <- sum(data_swapped[,1] == 0 & data_swapped[,2] == 0)
+  
+  # Calculate the posterior parameters for Dirichlet distribution
+  alpha_prior <- c(1,1,1,1)
+  data_counts_swapped <- as.vector(t(marginal_table_swapped))
+  alpha_posterior_swapped <- alpha_prior + data_counts_swapped
+  
+  num_samples <- 100000
+  
+  # Drawing samples from the posterior Dirichlet distribution
+  theta_samples_swapped <- matrix(NA, nrow=num_samples, ncol=4)
+  for (i in 1:num_samples) {
+    theta_samples_swapped[i,] <- rdirichlet(1, alpha_posterior_swapped)
+  }
+  
+  # Calculating Phi for each sample
+  phi_values_swapped <- theta_samples_swapped[, 1] * theta_samples_swapped[, 4] / (theta_samples_swapped[, 2] * theta_samples_swapped[, 3])
+  
+  # Add phi_values_swapped into combined_data with a new source label for each iteration
+  temp_data <- data.frame(Value = phi_values_swapped, Source = paste0("Run_", iteration))
+  combined_data <- rbind(combined_data, temp_data)
+}
+
+# Get enough color for plotting
+color_palette <- brewer.pal(n=length(unique(combined_data$Source)), name="Set3")
+
+# Plot the combined density plot
+ggplot(combined_data, aes(x=Value, fill=Source)) + 
+  geom_density(alpha=0.5) + 
+  labs(title="Density Distribution of Phi: Multiple Runs with p=1", x="Phi Value", y="Density") + 
+  scale_fill_manual(values=color_palette) + 
+  theme_minimal()
+```
+
+# Conclusions:
+
+The impact of the swapping algorithm on the data is contingent upon the setting of θ∗. Different θ∗ settings lead to different trends in the ϕ distribution.
+
+The swapping algorithm tends to pull the ϕ value towards 1, possibly due to the increase in data uniformity introduced by the swaps.
+
+Implications for Data Privacy: From this perspective, if the goal is to enhance the anonymity or randomness of the data, this swapping method appears to be effective. The process introduces more randomness, potentially breaking some of the structures or patterns present in the original data.
+
+Considerations for Data Structure: On the other hand, if the aim is to retain certain structures or patterns inherent in the original data, then we might need to think of some other methods. The swapping, as observed, might disrupt some of the original data characteristics.
+
+----------------------------------------------------------------------------------------------------------------
+
+# Let's play around with 3 columns example
+# Data Generation
+Since now our number of theta has increased, we try to do a simple simulation first with:
+$$\theta^* = (0.15, 0.1, 0.15, 0.1, 0.15, 0.1, 0.15, 0.1).$$
+```{r, echo=FALSE, cache=TRUE}
+# Example probabilities for the 8 combinations
+theta <- c(0.15, 0.1, 0.15, 0.1, 0.15, 0.1, 0.15, 0.1)
+
+# All possible combinations
+combinations <- expand.grid(Q1 = c(0, 1), Q2 = c(0, 1), Q3 = c(0, 1))
+combinations$theta_values <- c(
+  paste0(theta[1]), 
+  paste0(theta[2]), 
+  paste0(theta[3]), 
+  paste0(theta[4]), 
+  paste0(theta[5]),
+  paste0(theta[6]), 
+  paste0(theta[7]), 
+  paste0(theta[8])
+)
+cat("Combinations of Q1, Q2 and Q3 with corresponding theta values:\n")
+kable(combinations, col.names = c("Q1","Q2", "Q3", "Corresponding Theta Values"))
+
+
+# We are only interested in the combinations of Q2 and Q3, so we can ignore the Q1 column.
+combinations_Q2Q3 <- unique(combinations[, c("Q2", "Q3")])
+
+# Calculate the corresponding theta values for each combination of Q2 and Q3
+combinations_Q2Q3$theta_values <- c(
+  paste0(theta[1], " + ", theta[5], " = ", sum(theta[c(1, 5)])), # 0 0
+  paste0(theta[2], " + ", theta[6], " = ", sum(theta[c(2, 6)])), # 0 1
+  paste0(theta[3], " + ", theta[7], " = ", sum(theta[c(3, 7)])), # 1 0
+  paste0(theta[4], " + ", theta[8], " = ", sum(theta[c(4, 8)]))  # 1 1
+)
+
+cat("Combinations of Q2 and Q3 with corresponding theta values:\n")
+kable(combinations_Q2Q3, col.names = c("Q2", "Q3", "Corresponding Theta Values"))
+```
+
+Therefore, the posterior distribution of the true phi should be around 1
+$$\frac{(θ_1+θ_5)*(θ_4+θ_8)}{(θ_2+θ_6)*(θ_3+θ_7)}=\frac{0.3*0.2}{0.3*0.2}=1$$
+
+
+```{r, tidy = TRUE, cache=TRUE}  
+# Data Generation
+n <- 100000
+# Example probabilities for the 8 combinations
+theta <- c(0.15, 0.1, 0.15, 0.1, 0.15, 0.1, 0.15, 0.1)
+
+# Generate all possible combinations
+combinations <- expand.grid(Q1 = c(0, 1), Q2 = c(0, 1), Q3 = c(0, 1))
+
+# Randomly sample rows based on the probabilities in theta
+sampled_rows <- sample(1:8, size = n, replace = TRUE, prob = theta)
+
+# Create the data frame
+data_3cols <- combinations[sampled_rows, ]
+head(data_3cols)
+
+# Constructing the 2x2 Marginal Tables
+marginal_table_Q1Q2 <- table(data_3cols$Q1, data_3cols$Q2)
+marginal_table_Q1Q3 <- table(data_3cols$Q1, data_3cols$Q3)
+marginal_table_Q2Q3 <- table(data_3cols$Q2, data_3cols$Q3)
+
+phi_star <- (theta[1]+theta[5])*(theta[4]+theta[8]) / ((theta[2]+theta[6])*(theta[3]+theta[7]))
+```
+
+
+# Dirichlet posterior model with confidence data
+
+
+```{r, tidy = TRUE}
+alpha_prior <- c(1,1,1,1)
+data_counts <- as.vector(t(marginal_table_Q2Q3))
+alpha_posterior <- alpha_prior + data_counts
+
+num_samples <- 100000
+
+# Drawing samples from the posterior Dirichlet distribution
+theta_samples <- matrix(NA, nrow=num_samples, ncol=4)
+for (i in 1:num_samples) {
+  theta_samples[i,] <- rdirichlet(1, alpha_posterior)
+}
+
+# Calculating Phi for each sample
+phi_values <- theta_samples[, 1] * theta_samples[, 4] / (theta_samples[, 2] * theta_samples[, 3])
+difference <- mean(phi_values) - phi_star
+print(paste("phi from actual posterior:", mean(phi_values)))
+print(paste("Difference:", difference))
+
+# Plotting the distribution of Phi
+ggplot(data.frame(phi_values), aes(x=phi_values)) + 
+  geom_histogram(aes(y=..density..), bins=50, fill="blue", alpha=0.7) + 
+  labs(title="Distribution of Phi", x="Phi Value", y="Density") + 
+  theme_minimal()
+
+ggplot(data.frame(phi_values), aes(x=phi_values)) + 
+  geom_density(fill="gray", alpha=0.7) + 
+  labs(title="Density Distribution of Phi", x="Phi Value", y="Density") + 
+  theme_minimal()
+```
+
+It is worth noting that our settings are relatively uniform. Especially when we consider the marginal table composed of Q2 and Q3, we will find that the theoretical phi should be equal to 1 at this situation.
+
+
+# Define and apply the DP Swapping function
+Here we use swap.var = 'Q3', match.var ='Q1', hold.var = 'Q2' to perform the swapping where swapping rate is 0.05.
+
+What we're actually doing is swapping Q3 while keeping the marginal distribution of Q2 constant, and using Q1 as the matching variable to decide which rows should be swapped.
+This is very similar to the two column case, except now you have an extra column Q1 as the matching variable.
+
+```{r, tidy = TRUE, cache=TRUE}
+# Apply DPSwap function
+DPSwap <- function(data, swap.rate,  nsim = 1,
+                   swap.var = 'swap', match.var = 'match', hold.var = 'hold',
+                   use.derangement = T){
+  # dat must have three columns: swap, match, and hold
+  # their names can be specified differently
+  # p is the swap rate
+  # nsim: number of copies needed
+  # if use.derangement = F, simple permutation is used
+  
+  names <- c(swap = swap.var, match = match.var, hold = hold.var)
+  dat <- rename(data, all_of(names)) %>%
+    rowid_to_column(var = 'index')
+  levels <- distinct(dat, match) %>% pull
+  dat_return <- dat %>% subset(NA) %>% add_column(iteration = NA, p = NA)
+  
+  for (p in swap.rate){
+    cat('swap rate =', p, '\n')
+    dat_ <- dat_return %>% subset(NA) 
+    ct_ <- 0
+    
+    for (j in levels){
+      ct_ <- ct_ + 1
+      cat(ct_, 'of', length(levels), "levels,", match.var, "=", j, "\n")
+      chunk_ <- dat %>% filter(match == j) 
+      index_current <- chunk_$index
+      n_chunk_ <- length(index_current)
+      
+      if (n_chunk_ > 1){  
+        for (k in 1:nsim){
+          i_ <- rbinom(n_chunk_, size = 1, prob = p)
+          while (sum(i_) == 1){
+            i_ <- rbinom(n_chunk_, size = 1, prob = p)
+          }
+          swap_locations <- which(i_ == 1)
+          i_swap <-  index_current[swap_locations]
+          if (use.derangement == T){
+            i_swapped <- derangr(i_swap)
+          } else {
+            i_swapped <- sample(i_swap, replace = F) 
+          }
+          index_new <- index_current
+          index_new[swap_locations] <- i_swapped
+          chunk_new <- chunk_
+          chunk_new$swap <- chunk_$swap[match(chunk_$index, index_new)]
+          chunk_new$iteration <- k
+          dat_ <- dat_ %>% bind_rows(chunk_new)
+        }
+      } else {
+        chunk_new <- chunk_
+        for (k in 1:nsim){
+          chunk_new$iteration <- k
+          dat_ <- dat_ %>% bind_rows(chunk_new)
+        }
+      }
+    }
+    dat_$p <- p
+    dat_return <- dat_return %>% bind_rows(dat_) 
+  }
+  return(dat_return)
+}
+
+swap.rate <- 0.05
+data_swapped <- DPSwap(data_3cols, swap.rate, nsim = 1, swap.var = 'Q3', match.var ='Q1', hold.var = 'Q2')
+```
+
+# Dirichlet posterior model with swapped data
+
+```{r, tidy = TRUE}
+# Constructing the 2x2 Marginal Tables for swapped data
+marginal_table_swapped_Q2Q3 <- table(data_swapped$hold, data_swapped$swap)
+
+# For this example, let's use the Q2 and Q3 marginal table for swapped data
+marginal_table_swapped <- marginal_table_swapped_Q2Q3
+
+# Calculate the posterior parameters for Dirichlet distribution for swapped data
+alpha_prior <- c(1,1,1,1)
+data_counts_swapped <- as.vector(t(marginal_table_swapped))
+alpha_posterior_swapped <- alpha_prior + data_counts_swapped
+
+# Drawing samples from the posterior Dirichlet distribution for swapped data
+theta_samples_swapped <- matrix(NA, nrow=num_samples, ncol=4)
+for (i in 1:num_samples) {
+  theta_samples_swapped[i,] <- rdirichlet(1, alpha_posterior_swapped)
+}
+
+# Calculating Phi for each sample for swapped data
+phi_values_swapped <- theta_samples_swapped[, 1] * theta_samples_swapped[, 4] / (theta_samples_swapped[, 2] * theta_samples_swapped[, 3])
+difference_swapped <- mean(phi_values_swapped) - phi_star
+print(paste("phi from swapped posterior:", mean(phi_values_swapped)))
+print(paste("Difference:", difference_swapped))
+
+# Combine the data into a single data frame for plotting
+combined_data <- data.frame(
+  Value = c(phi_values, phi_values_swapped),
+  Source = factor(c(rep("Original", length(phi_values)), rep("Swapped", length(phi_values_swapped))))
+)
+
+# Plot the combined density plot
+ggplot(combined_data, aes(x=Value, fill=Source)) + 
+  geom_density(alpha=0.5) + 
+  labs(title="Density Distribution of Phi: Original vs Swapped", x="Phi Value", y="Density") + 
+  scale_fill_manual(values=c("blue", "red")) + 
+  theme_minimal()
+```
+
+We can see that under relatively uniform initial settings, the swapping algorithm that satisfies DP will not change the \(φ\) statistic too much without changing the marginal sum. To verify this observation, we conducted the following experiments using multiple swapping rates and the same \(θ\):
+
+# Apply swapping rate from 0.1,0.2,...,1 to the data and plot the combined density plot 
+
+```{r,echo=FALSE,message=FALSE}
+# vector defining the swapping rate
+swap.rates <- c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1)
+
+# Initialize an empty data frame to store all Phi values and corresponding swapping rates
+all_phi_values <- data.frame(Value = numeric(), SwapRate = factor())
+
+# Loop over each swapping rate
+for (swap.rate in swap.rates) {
+  # apply DPSwap functions
+  data_swapped <- DPSwap(data_3cols, swap.rate, nsim = 1, swap.var = 'Q3', match.var ='Q1', hold.var = 'Q2')
+  
+  # Use the swapped data to construct marginal tables for Q2 and Q3
+  marginal_table_swapped_Q2Q3 <- table(data_swapped$hold, data_swapped$swap)
+  marginal_table_swapped <- marginal_table_swapped_Q2Q3
+  
+  # Estimating the Dirichlet posterior distribution using swapped data
+  alpha_prior <- c(1,1,1,1)
+  data_counts_swapped <- as.vector(t(marginal_table_swapped))
+  alpha_posterior_swapped <- alpha_prior + data_counts_swapped
+  
+  # Draw samples from the posterior distribution of the swapped data
+  theta_samples_swapped <- matrix(NA, nrow=num_samples, ncol=4)
+  for (i in 1:num_samples) {
+    theta_samples_swapped[i,] <- rdirichlet(1, alpha_posterior_swapped)
+  }
+  
+  # Calculate the Phi value for each sample of the swapped data
+  phi_values_swapped <- theta_samples_swapped[, 1] * theta_samples_swapped[, 4] / (theta_samples_swapped[, 2] * theta_samples_swapped[, 3])
+  
+  # Add these Phi values and corresponding replacement rates to the all_phi_values data frame
+  all_phi_values <- rbind(all_phi_values, data.frame(Value = phi_values_swapped, SwapRate = factor(swap.rate)))
+}
+all_phi_values <- rbind(all_phi_values, data.frame(Value = phi_values, SwapRate = "Original"))
+
+ggplot(all_phi_values, aes(x=Value, fill=SwapRate)) + 
+  geom_density(alpha=0.5, position="identity") + 
+  labs(title="Density Distribution of Phi for Different Swap Rates and Original Data", x="Phi Value", y="Density") + 
+  scale_fill_brewer(palette="Set3", name="Swap Rate/Original") + 
+  theme_minimal()
+```
+
+After confirming this, we need to change the value of \(θ\) so that the true value of \(φ\) is not equal to 1, and then conduct a new experiment.
+
+
+This time, we use the following settings
+$$\theta^* = (0.3, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1).$$
+Therefore, the posterior distribution of the true phi should be around 2
+$$\frac{(θ_1+θ_5)*(θ_4+θ_8)}{(θ_2+θ_6)*(θ_3+θ_7)}=\frac{0.4*0.2}{0.2*0.2}=2$$
+**Since the setting of \(θ\) is no longer "uniform", the exchange algorithm will have a greater impact on the statistics, and the impact will increase as the exchange rate increases.**
+
+```{r, echo=FALSE}
+
+# Data Generation
+n <- 100000
+# Example probabilities for the 8 combinations
+theta <- c(0.3, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1)
+
+# Generate all possible combinations
+combinations <- expand.grid(Q1 = c(0, 1), Q2 = c(0, 1), Q3 = c(0, 1))
+
+# Randomly sample rows based on the probabilities in theta
+sampled_rows <- sample(1:8, size = n, replace = TRUE, prob = theta)
+
+# Create the data frame
+data_3cols <- combinations[sampled_rows, ]
+
+
+# Constructing the 2x2 Marginal Tables
+marginal_table_Q1Q2 <- table(data_3cols$Q1, data_3cols$Q2)
+marginal_table_Q1Q3 <- table(data_3cols$Q1, data_3cols$Q3)
+marginal_table_Q2Q3 <- table(data_3cols$Q2, data_3cols$Q3)
+
+# For this example, let's use the Q2 and Q3 marginal table
+marginal_table <- marginal_table_Q2Q3
+
+# Calculating ϕ∗
+phi_star <- (theta[1]+theta[5])*(theta[4]+theta[8]) / ((theta[2]+theta[6])*(theta[3]+theta[7]))
+
+# Estimating θ values for Q1 and Q2
+theta_hat <- c(marginal_table[1,1], marginal_table[1,2], marginal_table[2,1], marginal_table[2,2]) / n
+
+# Calculating ϕactual then Comparing ϕ∗ and ϕactual
+phi_actual <- theta_hat[1]*theta_hat[4] / (theta_hat[2]*theta_hat[3])
+
+# posterior Dirichlet distribution
+alpha_prior <- c(1,1,1,1)
+data_counts <- as.vector(t(marginal_table_Q2Q3))
+alpha_posterior <- alpha_prior + data_counts
+
+num_samples <- 100000
+
+# Drawing samples from the posterior Dirichlet distribution
+theta_samples <- matrix(NA, nrow=num_samples, ncol=4)
+for (i in 1:num_samples) {
+  theta_samples[i,] <- rdirichlet(1, alpha_posterior)
+}
+
+# Calculating Phi for each sample
+phi_values <- theta_samples[, 1] * theta_samples[, 4] / (theta_samples[, 2] * theta_samples[, 3])
+# vector defining the swapping rate
+swap.rates <- c(0.01, 0.05, 0.1, 0.2, 0.3, 0.5, 0.8, 1)
+
+# Initialize an empty data frame to store all Phi values and corresponding swapping rates
+all_phi_values <- data.frame(Value = numeric(), SwapRate = factor())
+
+# Loop over each swapping rate
+for (swap.rate in swap.rates) {
+  # apply DPSwap functions
+  data_swapped <- DPSwap(data_3cols, swap.rate, nsim = 1, swap.var = 'Q3', match.var ='Q1', hold.var = 'Q2')
+  
+  # Use the swapped data to construct marginal tables for Q2 and Q3
+  marginal_table_swapped_Q2Q3 <- table(data_swapped$hold, data_swapped$swap)
+  marginal_table_swapped <- marginal_table_swapped_Q2Q3
+  
+  # Estimating the Dirichlet posterior distribution using swapped data
+  alpha_prior <- c(1,1,1,1)
+  data_counts_swapped <- as.vector(t(marginal_table_swapped))
+  alpha_posterior_swapped <- alpha_prior + data_counts_swapped
+  
+  # Draw samples from the posterior distribution of the swapped data
+  theta_samples_swapped <- matrix(NA, nrow=num_samples, ncol=4)
+  for (i in 1:num_samples) {
+    theta_samples_swapped[i,] <- rdirichlet(1, alpha_posterior_swapped)
+  }
+  
+  # Calculate the Phi value for each sample of the swapped data
+  phi_values_swapped <- theta_samples_swapped[, 1] * theta_samples_swapped[, 4] / (theta_samples_swapped[, 2] * theta_samples_swapped[, 3])
+  
+  # Add these Phi values and corresponding replacement rates to the all_phi_values data frame
+  all_phi_values <- rbind(all_phi_values, data.frame(Value = phi_values_swapped, SwapRate = factor(swap.rate)))
+}
+all_phi_values <- rbind(all_phi_values, data.frame(Value = phi_values, SwapRate = "Original"))
+
+ggplot(all_phi_values, aes(x=Value, fill=SwapRate)) + 
+  geom_density(alpha=0.5, position="identity") + 
+  labs(title="Density Distribution of Phi for Different Swap Rates and Original Data", x="Phi Value", y="Density") + 
+  scale_fill_brewer(palette="Set3", name="Swap Rate/Original") + 
+  theme_minimal()
+```
+
+From the graph, we can observe that as \(p\) increases, \(φ\) is "pulled" towards 1 and becomes increasingly "sharp". This further confirms our hypothesis from the previous example: when the true \(φ\) deviates significantly from 1, i.e., when \(θ\) is not uniformly distributed, the swapping algorithm tends to make the data lean towards a uniform distribution.
+
+----------------------------------------------------------------------------------------------------------------
+
+**So far, we have a preliminary understanding of DP-compliant swapping algorithms. We know how the swapping algorithm affects statistics and microdata internal information. So next we want to try the hardest part of the experiment: How to use some algorithms based on Bayesian analysis to get the correct (possibly increased uncertainty) when only knowing the private data and the privacy mechanism (in this case, the swapping algorithm) statistical inference?**
+
+kindly reminder:
+
+$$ \pi (\theta) \sim Dir(1,1,1,1) $$
+
+$$X \mid \theta \sim Mult(n, \theta)$$
+
+$$S \mid X \sim η_p(S\mid X)$$
+
+Where \(X\) is confidential data (missing) and \(S\) is the privatized data (observed), \(η_p\) is the swapping mechanism.
+
+### The problem here is that the swapping algorithm can be easily implemented, but formulating s|x is definitely not an easy task.
+
+### Complex problems are often broken down into smaller, simpler ones. Therefore, let's first consider the following scenario: Given a 2x10 marginal table corresponding to micro-data, can we determine all potential marginal tables (also known as the support) that can be obtained through exchange algorithms?
+
+### Let us use a simple example as follows:
+
+```{r,echo = FALSE}
+# Calculate the corresponding theta values for each combination of Q2 and Q3
+col1 <- c(1,1,1,1,1,1,1,0,0,0)
+col2 <- c('Y','Y','Y','Y','Y','Y','N','Y','Y','N')
+example <- t(rbind(col1,col2))
+
+
+colnames(example) <- c("Q1", "Q2")
+
+
+kable(example, col.names = c("Q1", "Q2"))
+```
+
+
+### Corresponding marginal table:
+$$\begin{pmatrix}
+6 & 1 \\
+2 & 1 \\
+\end{pmatrix}$$
+
+### So what are all the potential marginal forms (supports) that can be created through swapping?
+
+```{r}
+generate_swaps <- function(margin_table) {
+  # Generate all possible margin tables by swapping
+  
+  # Extract values from the margin table
+  a <- margin_table[1,1]
+  b <- margin_table[1,2]
+  c <- margin_table[2,1]
+  d <- margin_table[2,2]
+  
+  # Ensure the swaps are valid (non-negative counts)
+  swaps <- list(
+    matrix(c(a+1, b-1, c-1, d+1), nrow=2),
+    matrix(c(a-1, b+1, c+1, d-1), nrow=2),
+    margin_table
+  )
+  
+  valid_swaps <- lapply(swaps, function(x) {
+    if (all(x >= 0)) return(x) else return(NULL)
+  })
+  
+  return(Filter(Negate(is.null), valid_swaps))
+}
+
+get_support <- function(margin_table, support_set = list()) {
+  # Recursive function to get the full support set
+  
+  # Convert margin table to string to use as a unique key
+  key <- paste(margin_table, collapse = ",")
+  
+  # If the margin table is already in the support set, return the support set
+  if (key %in% names(support_set)) {
+    return(support_set)
+  }
+  
+  # Add the margin table to the support set
+  support_set[[key]] <- margin_table
+  
+  # Get all possible swaps for the current margin table
+  swaps <- generate_swaps(margin_table)
+  
+  # Recursively add swaps to the support set
+  for (swap in swaps) {
+    support_set <- get_support(swap, support_set)
+  }
+  
+  return(support_set)
+}
+
+# Given example margin table
+example_margin <- matrix(c(6, 1, 2, 1), nrow=2)
+
+# Get the support set for the example
+support_set <- get_support(example_margin)
+
+# change support_set into df
+support_df <- do.call(rbind, lapply(support_set, function(x) c(x[1,1], x[1,2], x[2,1], x[2,2])))
+colnames(support_df) <- c("Row1Col1", "Row1Col2", "Row2Col1", "Row2Col2")
+
+
+tg <- tableGrob(support_df, rows = NULL)
+
+# Draw the table
+grid.draw(tg)
+```
+
+Then we conduct an exchange simulation with \(N = 100000\) and try to use brute force to obtain the Monte Carlo estimate of S|X when \(p = 0.5\)
+
+```{r}
+derangr <- function(x){
+  v = 1:length(x)
+  while(TRUE){
+    xp <- sample(v)
+    if(sum(xp == v) == 0) break
+  }
+  return(x[xp])
+}
+
+simulate_swaps <- function(initial_margin, p, n=10000){
+  results <- list()
+  
+  # Convert marginal table into microdata
+  microdata <- c(rep("1|1", initial_margin[1,1]), 
+                 rep("0|1", initial_margin[1,2]), 
+                 rep("1|0", initial_margin[2,1]), 
+                 rep("0|0", initial_margin[2,2]))
+  
+  for(i in 1:n){
+    # Copy microdata
+    current_data <- microdata
+    
+    # 2nd column
+    second_col <- substr(current_data, 3, 3)
+    
+    # Choose rows with p
+    selected_rows <- which(runif(length(second_col)) <= p)
+    
+    # Implement the derangement function
+    if(length(selected_rows) > 1){
+      second_col[selected_rows] <- derangr(second_col[selected_rows])
+    }
+    
+    # Update the microdata
+    current_data <- paste0(substr(current_data, 1, 1), "|", second_col)
+    
+    # Calculate the new marginal table
+    key <- paste(c(sum(current_data == "1|1"), sum(current_data == "1|0"), sum(current_data == "0|1"), sum(current_data == "0|0")), collapse = ",")
+    
+    # Update the list(S|X)
+    if(!is.null(results[[key]])){
+      results[[key]] <- results[[key]] + 1
+    } else {
+      results[[key]] <- 1
+    }
+  }
+  
+  return(results)
+}
+
+initial_margin <- matrix(c(6, 1, 2, 1), nrow=2)
+p <- 0.5
+results <- simulate_swaps(initial_margin, p, 10000)
+results
+```
+
+Then plot the graph in reverse order of frequency
+
+
+```{r}
+# Convert the results list to a data frame
+df <- data.frame(
+  MarginTable = names(results),
+  Count = unlist(results)
+)
+
+# Order the data frame by Count
+df <- df[order(df$Count), ]
+
+# Plot the data
+ggplot(df, aes(x = reorder(MarginTable, Count), y = Count)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Simulation Results for Margin Tables",
+       x = "Margin Table Configuration",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+### Next we use a slightly more complex example. The marginal table of this example is as follows:
+$$\begin{pmatrix}
+10 & 5 \\
+10 & 5 \\
+\end{pmatrix}$$
+
+Experiment with the same settings
+
+### Support:
+
+```{r,echo=FALSE}
+generate_swaps <- function(margin_table) {
+  # Generate all possible margin tables by swapping
+  
+  # Extract values from the margin table
+  a <- margin_table[1,1]
+  b <- margin_table[1,2]
+  c <- margin_table[2,1]
+  d <- margin_table[2,2]
+  
+  # Ensure the swaps are valid (non-negative counts)
+  swaps <- list(
+    matrix(c(a+1, b-1, c-1, d+1), nrow=2),
+    matrix(c(a-1, b+1, c+1, d-1), nrow=2),
+    margin_table
+  )
+  
+  valid_swaps <- lapply(swaps, function(x) {
+    if (all(x >= 0)) return(x) else return(NULL)
+  })
+  
+  return(Filter(Negate(is.null), valid_swaps))
+}
+
+get_support <- function(margin_table, support_set = list()) {
+  # Recursive function to get the full support set
+  
+  # Convert margin table to string to use as a unique key
+  key <- paste(margin_table, collapse = ",")
+  
+  # If the margin table is already in the support set, return the support set
+  if (key %in% names(support_set)) {
+    return(support_set)
+  }
+  
+  # Add the margin table to the support set
+  support_set[[key]] <- margin_table
+  
+  # Get all possible swaps for the current margin table
+  swaps <- generate_swaps(margin_table)
+  
+  # Recursively add swaps to the support set
+  for (swap in swaps) {
+    support_set <- get_support(swap, support_set)
+  }
+  
+  return(support_set)
+}
+
+# Given example margin table
+example_margin <- matrix(c(10, 5, 10, 10), nrow=2)
+
+# Get the support set for the example
+support_set <- get_support(example_margin)
+
+# Convert support_set to df
+support_df <- do.call(rbind, lapply(support_set, function(x) c(x[1,1], x[1,2], x[2,1], x[2,2])))
+colnames(support_df) <- c("Row1Col1", "Row1Col2", "Row2Col1", "Row2Col2")
+
+
+tg <- tableGrob(support_df, rows = NULL)
+
+# Draw the table
+grid.draw(tg)
+```
+
+**Next we use Monte Carlo simulation to approximate S|X in the simpler case.**
+Here we use \(p = 0.5\) to facilitate observation of the results. The initial marginal table is still \((10,5,10,5)\).
+
+### Simulation result:
+
+```{r, cache=TRUE}
+# Helper function: Calculate the distance between two marginal tables
+calculate_distance <- function(margin1, margin2) {
+  abs(margin1[1,1] - margin2[1,1])
+}
+
+# Simulation function
+simulate_swaps <- function(initial_margin, p, n=10000) {
+  results <- list()
+  
+  # Convert initial marginal table to micro data
+  microdata <- c(rep("1|1", initial_margin[1,1]), 
+                 rep("0|1", initial_margin[1,2]), 
+                 rep("1|0", initial_margin[2,1]), 
+                 rep("0|0", initial_margin[2,2]))
+  
+  for(i in 1:n) {
+    # Copy microdata
+    current_data <- microdata
+    
+    # Extract the second column
+    second_col <- substr(current_data, 3, 3)
+    
+    # Select rows for swapping based on probability p
+    selected_rows <- which(runif(length(second_col)) <= p)
+    
+    # Apply derangement function
+    if(length(selected_rows) > 1) {
+      second_col[selected_rows] <- derangr(second_col[selected_rows])
+    }
+    
+    # Update microdata
+    current_data <- paste0(substr(current_data, 1, 1), "|", second_col)
+    
+    # Calculate new margin table
+    new_margin <- matrix(c(sum(current_data == "1|1"), sum(current_data == "0|1"), 
+                           sum(current_data == "1|0"), sum(current_data == "0|0")), nrow=2)
+    
+    # Calculate distance
+    distance <- calculate_distance(initial_margin, new_margin)
+    
+    # Update result list
+    key <- paste(c(new_margin[1,1], new_margin[1,2], new_margin[2,1], new_margin[2,2], distance), collapse = ",")
+    if(!is.null(results[[key]])) {
+      results[[key]] <- results[[key]] + 1
+    } else {
+      results[[key]] <- 1
+    }
+  }
+  
+  return(results)
+}
+
+# Simulation
+initial_margin <- matrix(c(10,5,10,5), nrow=2)
+p <- 0.5
+results <- simulate_swaps(initial_margin, p, 10000)
+
+# Convert results to dataframe and add distance column
+df <- data.frame(
+  MarginTable = names(results),
+  Count = unlist(results),
+  Distance = sapply(strsplit(names(results), ","), function(x) as.numeric(x[5]))
+)
+
+# Sort by Count column in descending order
+df_sorted <- df[order(-df$Count), ]
+
+print(df_sorted, row.names = FALSE)
+
+```
+
+From the descending count table, we can clearly see that as the distance increases, the frequency gradually decreases. 
+
+To be more intuitive, let’s draw a plot:
+
+```{r,echo=FALSE}
+# Convert into data frame
+df <- data.frame(
+  MarginTable = names(results),
+  Count = unlist(results),
+  Distance = as.numeric(sapply(strsplit(names(results), ","), function(x) x[5]))
+)
+
+# Format MarginTable column, add brackets and remove d values
+df$MarginTableFormatted <- gsub("(.+),(.+),(.+),(.+),(.+)", "(\\1,\\2,\\3,\\4), D = \\5", df$MarginTable)
+
+# Sort by distance and count
+df <- df[order(df$Distance, df$Count, decreasing = TRUE), ]
+
+# Draw plot
+ggplot(df, aes(x = reorder(MarginTableFormatted, -Distance), y = Count)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Simulation Results for Margin Tables by Distance",
+       x = "Margin Table Configuration",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+One might say that the frequencies of the two with the same distance from the initial marginal table are very similar, but in fact this is because our initial table is very "uniform". Next we try the following settings: \( \begin{pmatrix} 4 & 6 \\ 8 & 10 \end{pmatrix} \) with \(P = 0.5\).
+
+```{r,ehco = FALSE}
+# Simulation
+initial_margin <- matrix(c(4,6,8,10), nrow=2)
+p <- 1
+results <- simulate_swaps(initial_margin, p, 10000)
+
+# Convert results to dataframe and add distance column
+df <- data.frame(
+  MarginTable = names(results),
+  Count = unlist(results),
+  Distance = sapply(strsplit(names(results), ","), function(x) as.numeric(x[5]))
+)
+
+# Sort by Count column in descending order
+df_sorted <- df[order(-df$Count), ]
+
+print(df_sorted, row.names = FALSE)
+
+# Convert into data frame
+df <- data.frame(
+  MarginTable = names(results),
+  Count = unlist(results),
+  Distance = as.numeric(sapply(strsplit(names(results), ","), function(x) x[5]))
+)
+
+# Format MarginTable column, add brackets and remove d values
+df$MarginTableFormatted <- gsub("(.+),(.+),(.+),(.+),(.+)", "(\\1,\\2,\\3,\\4), D = \\5", df$MarginTable)
+
+# Sort by distance and count
+df <- df[order(df$Distance, df$Count, decreasing = TRUE), ]
+
+# Draw plot
+ggplot(df, aes(x = reorder(MarginTableFormatted, -Distance), y = Count)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  labs(title = "Simulation Results for Margin Tables by Distance",
+       x = "Margin Table Configuration",
+       y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+Now, as the distance increases, the frequency appears to gradually decrease.
+
+
+
+
+----------------------------------------------------------------------------------------------------------------
+
+**In our previous experiments, we learned how to determine the support for potential marginal tables that can be obtained through a swapping algorithm. Additionally, using Monte Carlo simulations, we estimated the likelihood of obtaining each marginal table given a specific margin and swap rate. Upon further observation, we also discerned the frequency patterns of obtaining marginal tables with varying 'distances' under different swap rates through the swapping algorithm.**
+
+
+## Experiment Design: Statistical Inference Using Approximate Bayesian Computation (ABC)
+
+### Objective
+This experiment aims to perform statistical inference on a specific dataset using the Approximate Bayesian Computation (ABC) method. Given a dataset \( S_{\text{obs}} \) is an \( n \times 2 \) data matrix, which can also be transformed into a \( 2 \times 2 \) marginal table.
+
+### Methodology
+1. **Prior Probability Setting**: We assume that the parameter \( \theta^{(i)} \) follows a Dirichlet distribution, i.e., $$\theta^{(i)} \sim \text{Dir}(1, 1, 1, 1).$$
+
+2. **Data Generation Process**: Given the parameter \( \theta^{(i)} \), we generate multinomial distribution data \( X^{(i)} \), i.e.,$$X^{(i)} | \theta^{(i)} \sim \text{Mult}(n, \theta).$$ Here, \( X^{(i)} \) is an \( n \times 2 \) data matrix.
+
+3. **Data Swapping Process**: Given the data \( X^{(i)} \), we apply a swapping algorithm \( \eta_p(S | X) \) with a swapping rate \( p \). This process involves fixing one column of data and permuting the other.
+
+4. **Acceptance/Rejection Criterion**: In each iteration, we compare the observed marginal table \( S_{\text{obs}} \) with the marginal table \( S^{(i)} \) obtained through the swapping algorithm. If \( S_{\text{obs}} = S^{(i)} \), we retain the current parameter \( \theta^{(i)} \); otherwise, we skip the current iteration.
+
+### Expected Outcome
+Through multiple iterations (100,000 times), we expect to obtain **the distribution of the parameter \( \theta \) concerning the observed data \( S_{\text{obs}} \)**. This distribution will reflect the uncertainty and range of variation of the parameters given the observed data.
+
+In the experiment, we use a dataset \( S_{\text{obs}} = \begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix} \), then theoretically θ should gradually increase.
+
+```{r, cache=TRUE}
+# Set parameters
+S_obs <- matrix(c(1, 2, 3, 4), nrow = 2) # Observed marginal table
+n <- sum(S_obs) # Total number of observations
+p <- 0.1 # Swap rate
+iterations <- 100000 # Number of iterations
+theta_prior <- c(1, 1, 1, 1) # Prior distribution parameters
+
+# Function to generate a derangement (permutation with no fixed points)
+derangr <- function(x) {
+  v = 1:length(x)
+  while(TRUE) {
+    xp <- sample(v)
+    if(sum(xp == v) == 0) break
+  }
+  return(x[xp])
+}
+
+
+# Function to convert 2x2 marginal table to n*2 data format
+marginal_to_microdata <- function(marginal_table) {
+  microdata <- matrix(nrow = 0, ncol = 2)
+  for (row in 1:nrow(marginal_table)) {
+    for (col in 1:ncol(marginal_table)) {
+      cell_data <- matrix(rep(c(row - 1, col - 1), marginal_table[row, col]), ncol = 2, byrow = TRUE)
+      microdata <- rbind(microdata, cell_data)
+    }
+  }
+  return(microdata)
+}
+
+# Initialize a list to store accepted theta values
+accepted_thetas <- list()
+
+# Iteration process
+for (i in 1:iterations) {
+  # Generate theta from the prior distribution
+  theta <- rdirichlet(1, theta_prior)
+  
+  # Generate X
+  X <- rmultinom(n, 1, theta)
+  X <- t(X)
+
+  # Constructing the 2x2 Marginal Table
+  X_marginal <- matrix(c(sum(X[,1]), sum(X[,2]), sum(X[,3]), sum(X[,4])), nrow=2)
+
+  # Convert X_marginal to microdata
+  X_microdata <- marginal_to_microdata(X_marginal)
+  
+  # Swap process
+  swap_indicator <- rbinom(nrow(X_microdata), 1, p)
+  swap_rows <- which(swap_indicator == 1)
+  if (length(swap_rows) > 1) {
+    swapped_values <- derangr(X_microdata[swap_rows, 2])
+    X_microdata[swap_rows, 2] <- swapped_values
+  }
+  
+  # Construct S_marginal from swapped microdata
+  S_marginal <- matrix(0, nrow=2, ncol=2)
+  for (row in 0:1) {
+    for (col in 0:1) {
+      S_marginal[row + 1, col + 1] <- sum(X_microdata[,1] == row & X_microdata[,2] == col)
+    }
+  }
+  
+  # Check if swapped data matches observed data
+  if (all(S_marginal == S_obs)) {
+    accepted_thetas[[length(accepted_thetas) + 1]] <- theta
+  }
+}
+
+
+```
+
+
+### Let’s plot the empirical density estimate of \(θ\)：
+
+```{r}
+theta1_values <- sapply(accepted_thetas, function(x) x[1])
+ggplot(data.frame(theta1 = theta1_values), aes(x = theta1)) + 
+    geom_density(fill="blue", alpha=0.7) + 
+    labs(title = "Density of Theta1", x = "Theta1", y = "Density") + 
+    theme_minimal() +
+    xlim(0, 1)  
+
+
+theta2_values <- sapply(accepted_thetas, function(x) x[2])
+ggplot(data.frame(theta2 = theta2_values), aes(x = theta2)) + 
+    geom_density(fill="blue", alpha=0.7) + 
+    labs(title = "Density of Theta2", x = "Theta2", y = "Density") + 
+    theme_minimal() +
+    xlim(0, 1)  
+
+
+theta3_values <- sapply(accepted_thetas, function(x) x[3])
+ggplot(data.frame(theta3 = theta3_values), aes(x = theta3)) + 
+    geom_density(fill="blue", alpha=0.7) + 
+    labs(title = "Density of Theta3", x = "Theta4", y = "Density") + 
+    theme_minimal() +
+    xlim(0, 1)
+
+theta4_values <- sapply(accepted_thetas, function(x) x[4])
+ggplot(data.frame(theta4 = theta4_values), aes(x = theta4)) + 
+    geom_density(fill="blue", alpha=0.7) + 
+    labs(title = "Density of Theta4", x = "Theta4", y = "Density") + 
+    theme_minimal() +
+    xlim(0, 1) 
+
+```
+
+We can see the expected conclusions from the figure. However, due to the low acceptance rate, even after many iterations (100,000 times), the effect is still not very good.
+
+
+### And our previous statistic φ (due to some outliers, we only show φ ≤ 10):
+
+```{r}
+phi_values <- sapply(accepted_thetas, function(theta) {
+  theta1 <- theta[1]
+  theta2 <- theta[2]
+  theta3 <- theta[3]
+  theta4 <- theta[4]
+  return((theta1 * theta4) / (theta2 * theta3))
+})
+
+# Truncated to 10
+filtered_phi_values <- phi_values[abs(phi_values) <= 10]
+
+ggplot(data.frame(filtered_phi_values), aes(x=filtered_phi_values)) + 
+  geom_density(fill="skyblue", alpha=0.7) + 
+  labs(title="Filtered Density Distribution of Phi (Swapped)", x="Phi Value (Swapped)", y="Density") + 
+  theme_minimal()
+
+```
+
+Then we try 5,000,000 times iterations and see the performance:
+
+```{r,echo=FALSE}
+knitr::include_graphics("C:\\Users\\14817\\Desktop\\Research\\Ddifferential Privacy\\Theta1.png")
+knitr::include_graphics("C:\\Users\\14817\\Desktop\\Research\\Ddifferential Privacy\\Theta2.png")
+knitr::include_graphics("C:\\Users\\14817\\Desktop\\Research\\Ddifferential Privacy\\Theta3.png")
+knitr::include_graphics("C:\\Users\\14817\\Desktop\\Research\\Ddifferential Privacy\\Theta4.png")
+```
+
+The image of \(θ\) becomes smoother and closer to the real value, since theoretically \(θ\) should be \((0.1,0.2,0.3,0.4)\).
+
+
+To encompass more uncertainties in our experiment, we have designed the following procedure:
+
+Assume our true parameter set \( \theta^* \) is \( (0.1, 0.2, 0.3, 0.4) \). Then, \( S^* \) given \( \theta^* \), denoted as \( S^* | \theta^* \), is generated from a multinomial distribution \( \text{Mult}(\theta^*) \). Due to the inherent uncertainty in this process, we repeat the sampling **10** times to produce different instances of \( S^* \).
+
+Subsequently, for each \( S^* \), we obtain \( S_{\text{obs}} \) given \( S^* \) and a swapping rate \( p \), which is precisely the outcome of our swapping algorithm. With \( S_{\text{obs}} \) in hand, we can proceed with the Approximate Bayesian Computation (ABC) as per our previous experimental design.
+
+To validate the power of the experiment, it is necessary to record the acceptance rate and examine the impact of different settings on this rate. Therefore, in the experiment, we iterate 100,000 times for different swapping rates \( p \), and different \( \theta^* \) sets to observe their respective acceptance rates.
+
+
+
+```{r,ehco=FALSE, cache=TRUE}
+ABC_simulation <- function(S_obs, p, iterations, theta_star, theta_prior, save_results = FALSE, result_prefix = "ABC_result") {
+  # Total number of observations
+  n <- sum(S_obs)
+
+  # Function to generate a derangement
+  derangr <- function(x) {
+    v = 1:length(x)
+    while(TRUE) {
+      xp <- sample(v)
+      if(sum(xp == v) == 0) break
+    }
+    return(x[xp])
+  }
+
+  # Function to convert 2x2 marginal table to n*2 data format
+  marginal_to_microdata <- function(marginal_table) {
+    microdata <- matrix(nrow = 0, ncol = 2)
+    for (row in 1:nrow(marginal_table)) {
+      for (col in 1:ncol(marginal_table)) {
+        cell_data <- matrix(rep(c(row - 1, col - 1), marginal_table[row, col]), ncol = 2, byrow = TRUE)
+        microdata <- rbind(microdata, cell_data)
+      }
+    }
+    return(microdata)
+  }
+
+  # Initialize a list to store accepted theta values and a counter for accepted iterations
+  accepted_thetas <- list()
+  accepted_count <- 0
+
+  # Iteration process
+  for (i in 1:iterations) {
+    # Generate theta from the prior distribution
+    theta <- rdirichlet(1, theta_prior)
+    
+    # Generate X
+    X <- rmultinom(n, 1, theta)
+    X <- t(X)
+
+    # Constructing the 2x2 Marginal Table
+    X_marginal <- matrix(c(sum(X[,1]), sum(X[,2]), sum(X[,3]), sum(X[,4])), nrow=2)
+
+    # Convert X_marginal to microdata
+    X_microdata <- marginal_to_microdata(X_marginal)
+    
+    # Swap process
+    swap_indicator <- rbinom(nrow(X_microdata), 1, p)
+    swap_rows <- which(swap_indicator == 1)
+    if (length(swap_rows) > 1) {
+      swapped_values <- derangr(X_microdata[swap_rows, 2])
+      X_microdata[swap_rows, 2] <- swapped_values
+    }
+    
+    # Construct S_marginal from swapped microdata
+    S_marginal <- matrix(0, nrow=2, ncol=2)
+    for (row in 0:1) {
+      for (col in 0:1) {
+        S_marginal[row + 1, col + 1] <- sum(X_microdata[,1] == row & X_microdata[,2] == col)
+      }
+    }
+    
+    # Check if swapped data matches observed data
+    if (all(S_marginal == S_obs)) {
+      accepted_thetas[[length(accepted_thetas) + 1]] <- theta
+      accepted_count <- accepted_count + 1
+    }
+  }
+
+  # Calculate acceptance rate
+  acceptance_rate <- accepted_count / iterations
+
+  if (save_results) {
+    # Generate filename containing S_obs, theta_prior, p, and iterations
+
+    S_obs_label <- paste0("S_obs_", paste(S_obs, collapse = "_"))
+    theta_label <- paste0("theta_star_", paste(theta_star, collapse = "_"))
+    p_label <- paste0("p_", p)
+    iter_label <- paste0("iter_", iterations)
+    filename <- paste0("C:/Users/14817/Desktop/Research/Ddifferential Privacy/DPswapping_files/Accepted thetas/", result_prefix, "_", S_obs_label, "_", theta_label, "_", p_label, "_", iter_label, ".RData")
+
+    # Save result
+    save(accepted_thetas, file = filename)
+  }
+
+  return(list("Accepted Thetas" = accepted_thetas, "Acceptance Rate" = acceptance_rate))
+}
+
+# Function to apply the swapping algorithm
+apply_swapping_algorithm <- function(margin_table, p) {
+  # marginal 2 microdata
+  microdata <- c(rep("1|1", margin_table[1,1]), 
+                 rep("0|1", margin_table[1,2]), 
+                 rep("1|0", margin_table[2,1]), 
+                 rep("0|0", margin_table[2,2]))
+
+  # apply swapping 
+  for(i in 1:nrow(margin_table)) {
+    # generate the indicater
+    swap_indicator <- rbinom(length(microdata), 1, p)
+    selected_rows <- which(swap_indicator == 1)
+
+    # apply the derangement
+    if(length(selected_rows) > 1) {
+      second_col <- substr(microdata[selected_rows], 3, 3)
+      swapped_values <- derangr(second_col)
+      microdata[selected_rows] <- paste0(substr(microdata[selected_rows], 1, 1), "|", swapped_values)
+    }
+  }
+
+  # microdata 2 marginal
+  new_margin <- matrix(c(sum(microdata == "1|1"), sum(microdata == "0|1"), 
+                         sum(microdata == "1|0"), sum(microdata == "0|0")), nrow=2)
+
+  return(new_margin)
+}
+```
+
+
+```{r, cache=TRUE}
+# Function to iterate over different θ* and p
+run_experiments <- function(theta_star_list, p_list, n, iterations, theta_prior, experiment_repeats) {
+  results <- data.frame()
+  for (theta_star in theta_star_list) {
+    for (p in p_list) {
+      acceptance_rates <- numeric(experiment_repeats)
+      for (i in 1:experiment_repeats) {
+        S_star <- rmultinom(1, n, theta_star)
+        S_star <- matrix(S_star, nrow = 2)
+        S_obs <- apply_swapping_algorithm(S_star, p)
+        ABC_results <- ABC_simulation(S_obs, p, iterations, theta_star, theta_prior, save_results = TRUE)
+        acceptance_rates[i] <- ABC_results$'Acceptance Rate'
+      }
+      avg_acceptance_rate <- mean(acceptance_rates)
+      results <- rbind(results, data.frame(Theta_Star = toString(theta_star), Swap_Rate = p, Acceptance_Rate = avg_acceptance_rate))
+    }
+  }
+  return(results)
+}
+
+# Setting
+theta_star_list <- list(c(0.1, 0.2, 0.3, 0.4), c(0.7, 0.1, 0.1, 0.1), c(0.27, 0.23, 0.23, 0.27), c(0.25, 0.25, 0.25, 0.25))
+p_list <- c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1)
+
+# Run the experiment
+experiment_results <- run_experiments(theta_star_list, p_list, 10, 100000, c(1, 1, 1, 1), 10)
+
+experiment_results
+```
+
+```{r}
+ggplot(experiment_results, aes(x = Swap_Rate, y = Acceptance_Rate, group = Theta_Star, color = Theta_Star)) +
+  geom_line() +
+  labs(title = "Acceptance Rate vs Swap Rate for Different Theta_Star",
+       x = "Swap Rate (p)",
+       y = "Acceptance Rate",
+       color = "Theta_Star") +
+  theme_minimal()
+```
+
+```{r, cache=TRUE}
+iterations <- 1000000 
+n <- 20
+theta_prior <- c(1, 1, 1, 1)
+theta_star <- rdirichlet(1,theta_prior)
+S_star <- matrix(rmultinom(1, n, theta_star), nrow = 2)
+p <- 0.1
+S_obs <- apply_swapping_algorithm(S_star, p)
+ABC <- ABC_simulation(S_obs, p, iterations, theta_star, theta_prior, save_results = TRUE)
+```
+
+
+```{r}
+file_path <- "C:/Users/14817/Desktop/Research/Ddifferential Privacy/DPswapping_files/Accepted thetas/ABC_result_S_obs_2_8_4_6_theta_star_0.149473099066021_0.137592124778162_0.552409465747302_0.160525310408514_p_0.1_iter_1e+06.RData"
+
+load(file_path)
+
+
+```
