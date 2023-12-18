@@ -1,7 +1,7 @@
 # 20231223_Effection of swapping on the multinomial example
 
-- Latest Updated: 20231209
-- Readme Edited: 20231209
+- Latest Updated: 20231218
+- Readme Edited: 20231218
 
 - Author: Qiru Pan, Yunhao Li, Yicong Li
 
